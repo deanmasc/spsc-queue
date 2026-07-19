@@ -2,12 +2,13 @@
 
 ### The Problem
 - The problem with SPSC queue is not regarding reading and writing the same data, this is because the consumer and producer are writing to different sides of the queue, so this danger is averted for SPSC
-- The core problem is in the case where the producer thread is mid writing to the tail of the queue (or the tail uint32_t), and the consumer reads the value partially written, therefore causing undefined behaviour, incorrect state of the queue or runtime errors 
+- One core problem is the reording of statements, if the compiler reorders statements when doing a push or a get, then the opposite thread can be given misleading information and the queue can be in incorrect state 
+- Another core problem is in the case where the producer thread is mid writing to the tail of the queue (or the tail uint32_t), and the consumer reads the value partially written, therefore causing undefined behaviour, incorrect state of the queue or runtime errors 
 
 
 ### Solution
 - As stated, the core issue is that the opposing thread reads from fields that may not be partially written yet, thereofre we need to ensure this is not possible
-- We can ensure this by making the write a single instruction, to do this we can use std::atomic for the `ring_buffer`, `head` and `tail` variables.
+- We can ensure this by making the write a single instruction, to do this we can use std::atomic for the `head` and `tail` variables.
 - To do this we use atomic operations `load` and `store` with `std::memory_order_acquire` and `std::memory_order_release` 
 - For writes we use `store` with `std::memory_order_release` so the write is done in a single isntruction and that no other statements in the code are moved from before the store to after the store. This is important because its ensuring that at the time of the write every line of code before it has run
 - For reads we use `load` with `std::memory_order_acquire`, so that the read is done in a single instruction and no other statements in the code are moved from after the load to before the load. This is important because it ensures that any succeeding lines of code are run ensuring that the load was completed first

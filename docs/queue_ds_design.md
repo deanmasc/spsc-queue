@@ -5,7 +5,7 @@
 - `uint32_t head`
 - `uint32_t tail`
 
-The head represents the index in the ring_buffer where the start of the queue is (oldest index), the tail represents the end of the queue (oldest index)
+The head represents the index in the ring_buffer where the start of the queue is (oldest index), the tail represents the end of the queue (newest index)
 
 ### Ring Buffer Implementation
 - Since push and get have to be O(1) operations, we need to ensure for get calls we dont have to shift the array to ensure that the head is always at index 0. It would be much easier to manage the capacity of the queue is the head started at 0, however this would breach O(1) expectation.
