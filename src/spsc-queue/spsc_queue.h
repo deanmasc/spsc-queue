@@ -1,7 +1,11 @@
+#ifndef SPSC_QUEUE_H
+#define SPSC_QUEUE_H
+
 #include <atomic>
 #include <array>
 #include <cstdlib>
 #include <optional>
+#include <iostream>
 
 template<typename T, uint32_t C>
 class SPSCQueue {
@@ -10,6 +14,11 @@ class SPSCQueue {
     std::array<T, C> ring_buffer;
     uint32_t head {};
     uint32_t tail {};
+
+    uint32_t get_index(const uint32_t& idx) const {
+        // Use bit-mask with AND to get the remainder (C is always a power of 2)
+        return idx & (C - 1); 
+    }
 
 public:
     bool push(T& val) {
@@ -20,7 +29,6 @@ public:
         return true;
     }
 
-    // For when we can steal data from val rather than copying
     bool push(T&& val) {
         if (is_full()) return false;
 
@@ -28,29 +36,33 @@ public:
         ++tail;
         return true;
     }
-
+    
     std::optional<T> get() {
-        if if_empty() return std::nullopt;
+        if (is_empty()) return std::nullopt;
 
         auto result{ring_buffer[get_index(head)]};
         ++head;
         return result;
     }
 
-    uint32_t size() {
+    uint32_t size() const {
         return tail - head;
     }
 
-    bool is_empty() {
+    bool is_empty() const {
         return this->size() == 0;
     }
 
-    bool is_full() {
+    bool is_full() const {
         return this->size() >= C;
     }
 
-    uint32_t get_index(const uint32_t& idx) {
-        // Use bit-mask with AND to get the remainder (C is always a power of 2)
-        return idx & (C - 1); 
+    void print() const {
+        for (uint32_t i{head}; i < tail; i++) {
+            std::cout << ring_buffer[get_index(i)] << ", ";
+        }
+        std::cout << "\n";
     }
 };
+
+#endif
