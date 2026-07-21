@@ -2,15 +2,18 @@
 #include <iostream>
 
 int main() {
-    SPSCQueue<std::vector<int>, 4> q;
-    std::vector<int> v1{1, 2, 3};
-    q.push({4, 5, 6});
-    q.push({7, 8, 9});
-    std::cout << v1.size() << std::endl;
-    q.push(std::move(v1));
+    SPSCQueue<int, 4> q;
+    int x {2};
+    q.push(1);
+    q.push(x);
+    q.push(4);
 
-    std::cout << v1.size() << std::endl;
-    q.get();
+    q.print();
+
+    std::cout << *q.get() << std::endl;
+    q.print();
+    std::cout << *q.get() << std::endl;
+    q.print();
 
     return 0;
 }
