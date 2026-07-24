@@ -20,6 +20,7 @@ class SPSCQueue {
     alignas(hardware_destructive_interference_size) std::array<T, C> ring_buffer;
     alignas(hardware_destructive_interference_size) std::atomic<uint32_t> head {};
     alignas(hardware_destructive_interference_size) std::atomic<uint32_t> tail {};
+    alignas(hardware_destructive_interference_size) std::atomic<uint32_t> head_cached_ {};
 
     uint32_t get_index(const uint32_t idx) const {
         // Use bit-mask with AND to get the remainder (C is always a power of 2)
@@ -43,12 +44,14 @@ public:
         // We need to acquire the head first to ensure that any of the ahead operations
         // read stale values, the acquire also ensures that we read the updated state from the 
         // consumer, and that uses of this curr_head get the correct state
-        auto curr_head {head.load(std::memory_order_acquire)};
         // We also load curr_tail here to get a copy before we update it again
         auto curr_tail {tail.load(std::memory_order_relaxed)};
 
         // pass into is_full so we ensure we do not need to re-acquire
-        if (is_full(curr_head, curr_tail)) return false;
+        if (is_full(head_cached_, curr_tail)) {
+            head_cached = {head.load(std::memory_order_acquire)};
+            if (is_full(head_cached_, curr_tail)) return false;
+        };
 
         ring_buffer[get_index(curr_tail)] = val;
         // This line ensures that the writing of tail is indivisible, no line before the store is moved to 
@@ -59,10 +62,12 @@ public:
     }
 
     bool push(T&& val) {
-        auto curr_head {head.load(std::memory_order_acquire)};
         auto curr_tail {tail.load(std::memory_order_relaxed)};
 
-        if (is_full(curr_head, curr_tail)) return false;
+        if (is_full(head_cached_, curr_tail)) {
+            head_cached = {head.load(std::memory_order_acquire)};
+            if (is_full(head_cached_, curr_tail)) return false;
+        };
 
         ring_buffer[get_index(curr_tail)] = std::move(val);
         // This line ensures that the writing of tail is indivisible, no line before the store is moved to 
@@ -78,7 +83,7 @@ public:
         if (is_empty(curr_head, curr_tail)) return std::nullopt;
 
         auto result = std::move(ring_buffer[get_index(curr_head)]);
-        // This line ensures that the writing of tail is indivisibleno line before the store is moved to 
+        // This line ensures that the writing of tail is indivisible, no line before the store is moved to 
         // after it, therefore once tail has been updated we know the operations before it have also ran
         head.store(curr_head + 1, std::memory_order_release);
         return result;
