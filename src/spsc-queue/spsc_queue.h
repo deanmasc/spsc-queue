@@ -99,14 +99,6 @@ public:
         auto curr_tail {tail.load(std::memory_order_acquire)};
         return curr_tail - curr_head;
     }
-
-    bool is_empty() const {
-        return this->size() == 0;
-    }
-
-    bool is_full() const {
-        return this->size() == C;
-    }
 };
 
 #endif
