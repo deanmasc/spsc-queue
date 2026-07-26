@@ -216,51 +216,13 @@ public:
         head.store(curr_head + 1, std::memory_order_release);
         return result;
     }
+
+    uint32_t size() const {
+        auto curr_head = head.load(std::memory_order_acquire);
+        auto curr_tail = tail.load(std::memory_order_acquire);
+        return curr_tail - curr_head;
+    }
 };
-
-template <template <typename, uint32_t> class Queue, uint32_t Capacity>
-double run_throughput_generic(std::chrono::milliseconds duration) {
-    Queue<uint64_t, Capacity> q;
-    std::atomic<bool> stop{false};
-    std::atomic<uint64_t> consumed{0};
-
-    std::thread producer([&] {
-        pin_to_core(0);
-        uint64_t i = 0;
-        SpinBackoff backoff;
-        while (!stop.load(std::memory_order_relaxed)) {
-            if (q.push(i)) {
-                ++i;
-                backoff.reset();
-            } else {
-                backoff.spin();
-            }
-        }
-    });
-
-    std::thread consumer([&] {
-        pin_to_core(1);
-        uint64_t count = 0;
-        SpinBackoff backoff;
-        while (!stop.load(std::memory_order_relaxed)) {
-            if (q.get().has_value()) {
-                ++count;
-                backoff.reset();
-            } else {
-                backoff.spin();
-            }
-        }
-        while (q.get().has_value()) ++count;
-        consumed.store(count, std::memory_order_relaxed);
-    });
-
-    std::this_thread::sleep_for(duration);
-    stop.store(true, std::memory_order_relaxed);
-    producer.join();
-    consumer.join();
-
-    return static_cast<double>(consumed.load()) / (duration.count() / 1000.0);
-}
 
 // ---------------------------------------------------------------------------
 // 4) Payload size scaling: throughput as payload grows from 8 to 256 bytes.
@@ -347,6 +309,78 @@ std::vector<double> run_burst_latency(std::size_t burst_size, std::size_t num_bu
     return latencies_ns;
 }
 
+// ---------------------------------------------------------------------------
+// Used by benchmark 3 (false-sharing cost): forces the SAME moderate
+// occupancy band onto every config via an external depth governor (checking
+// size(), which does plain acquire loads with no interaction with the
+// push/get code path under test), plus modest per-item work on both sides.
+//
+// A raw max-speed race (an earlier version of this benchmark) lets each
+// config settle into whatever occupancy equilibrium its own internal costs
+// happen to produce -- and different configs can settle at wildly different
+// equilibria (one sitting near-empty, another near-full) even under
+// identical nominal conditions, which then dominates the result for reasons
+// that have nothing to do with false sharing. This holds occupancy fixed and
+// identical across configs instead, so throughput differences can only come
+// from the actual code path.
+template <template <typename, uint32_t> class Queue, uint32_t Capacity>
+double run_governed_throughput(std::chrono::milliseconds duration, uint32_t target_low,
+                                uint32_t target_high, int per_item_work,
+                                std::vector<uint32_t>* depth_samples = nullptr) {
+    Queue<uint64_t, Capacity> q;
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> consumed{0};
+    volatile uint64_t sink = 0;
+
+    std::thread producer([&] {
+        pin_to_core(0);
+        uint64_t i = 0;
+        SpinBackoff gov, push_backoff;
+        while (!stop.load(std::memory_order_relaxed)) {
+            while (q.size() >= target_high && !stop.load(std::memory_order_relaxed)) gov.spin();
+            if (stop.load(std::memory_order_relaxed)) break;
+            for (int k = 0; k < per_item_work; ++k) sink += k;
+            if (q.push(i)) {
+                ++i;
+                push_backoff.reset();
+            } else {
+                push_backoff.spin();
+            }
+        }
+    });
+
+    std::thread consumer([&] {
+        pin_to_core(1);
+        uint64_t count = 0;
+        SpinBackoff gov, pop_backoff;
+        while (!stop.load(std::memory_order_relaxed)) {
+            while (q.size() <= target_low && !stop.load(std::memory_order_relaxed)) gov.spin();
+            if (stop.load(std::memory_order_relaxed)) break;
+            if (q.get().has_value()) {
+                ++count;
+                pop_backoff.reset();
+                for (int k = 0; k < per_item_work; ++k) sink += k;
+            } else {
+                pop_backoff.spin();
+            }
+        }
+        while (q.get().has_value()) ++count;
+        consumed.store(count, std::memory_order_relaxed);
+    });
+
+    if (depth_samples) {
+        auto start = clock_type::now();
+        while (clock_type::now() - start < duration) depth_samples->push_back(q.size());
+    } else {
+        std::this_thread::sleep_for(duration);
+    }
+    stop.store(true, std::memory_order_relaxed);
+    producer.join();
+    consumer.join();
+
+    return static_cast<double>(consumed.load()) / (duration.count() / 1000.0);
+}
+
 // Repeat a throughput measurement and take the median. A single 1s sample can
 // land on a performance core one time and an efficiency core the next (real
 // affinity isn't available on Apple Silicon), which swings raw throughput by
@@ -378,15 +412,59 @@ int main() {
     auto latency_samples = run_latency_samples<4096>(20'000);
     report_latency("steady-rate", std::move(latency_samples));
 
-    // 3) False-sharing cost
-    print_header("3) False-sharing cost (cache-line separated vs packed head/tail, median of 9 trials)");
-    double separated = median_of_trials(
-        [&] { return run_throughput_generic<SPSCQueue, kCapacity>(kTrialDuration); }, kNumTrials);
-    double packed = median_of_trials(
-        [&] { return run_throughput_generic<PackedSPSCQueue, kCapacity>(kTrialDuration); }, kNumTrials);
-    std::printf("separated: %.2f M msgs/sec\n", separated / 1e6);
-    std::printf("packed:    %.2f M msgs/sec\n", packed / 1e6);
-    std::printf("delta:     %.1f%%\n", (separated - packed) / packed * 100.0);
+    // 3) False-sharing cost (cache-line separated vs packed head/tail), under
+    // a governed occupancy band rather than a raw max-speed race. A max-speed
+    // race lets each config settle into whatever occupancy equilibrium its
+    // own internal costs happen to produce -- and different configs can land
+    // at wildly different equilibria (one near-empty, another near-full) even
+    // under identical nominal conditions, which then dominates the result for
+    // reasons that have nothing to do with false sharing. Holding occupancy
+    // fixed and identical across configs isolates the actual effect.
+    print_header("3) False-sharing cost (governed occupancy band, rotated trials)");
+    {
+        constexpr uint32_t kLow = 2000, kHigh = 8000;
+        constexpr int kWork = 2;
+
+        auto occ = [&](const char* name, auto run) {
+            std::vector<uint32_t> samples;
+            run(samples);
+            std::sort(samples.begin(), samples.end());
+            std::printf("occupancy %-9s p10=%6u  p50=%6u  p90=%6u  max=%6u\n", name,
+                        samples[samples.size() / 10], samples[samples.size() / 2],
+                        samples[samples.size() * 9 / 10], samples.back());
+        };
+        occ("separated", [&](std::vector<uint32_t>& s) {
+            run_governed_throughput<SPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh, kWork, &s);
+        });
+        occ("packed", [&](std::vector<uint32_t>& s) {
+            run_governed_throughput<PackedSPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh, kWork,
+                                                                 &s);
+        });
+
+        // Rotate run order across trials so neither config systematically
+        // benefits from a fixed warm-up/cool-down slot.
+        std::vector<double> sep, pkd;
+        for (int i = 0; i < kNumTrials; ++i) {
+            double s, p;
+            if (i % 2 == 0) {
+                s = run_governed_throughput<SPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh, kWork);
+                p = run_governed_throughput<PackedSPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh,
+                                                                        kWork);
+            } else {
+                p = run_governed_throughput<PackedSPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh,
+                                                                        kWork);
+                s = run_governed_throughput<SPSCQueue, kCapacity>(kTrialDuration, kLow, kHigh, kWork);
+            }
+            sep.push_back(s);
+            pkd.push_back(p);
+        }
+        std::sort(sep.begin(), sep.end());
+        std::sort(pkd.begin(), pkd.end());
+        std::printf("separated: median=%.2f M/s  p10=%.2f  p90=%.2f\n", sep[sep.size() / 2] / 1e6,
+                    sep[sep.size() / 10] / 1e6, sep[sep.size() * 9 / 10] / 1e6);
+        std::printf("packed:    median=%.2f M/s  p10=%.2f  p90=%.2f\n", pkd[pkd.size() / 2] / 1e6,
+                    pkd[pkd.size() / 10] / 1e6, pkd[pkd.size() * 9 / 10] / 1e6);
+    }
 
     // 4) Payload size scaling
     print_header("4) Payload size scaling (8 -> 256 bytes, median of 9 trials)");

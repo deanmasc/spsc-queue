@@ -70,8 +70,10 @@ Testing/
 
 #vscode
 .vscode/
+.claude/
 
 # out
 src/main
 
 src/bench/spsc_bench
+src/bench/bench
