@@ -18,9 +18,13 @@ class SPSCQueue {
     static_assert(C != 0 && (C & (C - 1)) == 0, "Capacity must be a power of 2.");
 
     alignas(hardware_destructive_interference_size) std::array<T, C> ring_buffer;
+    // head and tail_cached_ are both written only by the consumer, so sharing
+    // a line between them adds no contention beyond what head already has.
     alignas(hardware_destructive_interference_size) std::atomic<uint32_t> head {};
+    // tail and head_cached_ are both written only by the producer, same reasoning.
     alignas(hardware_destructive_interference_size) std::atomic<uint32_t> tail {};
-    alignas(hardware_destructive_interference_size) std::atomic<uint32_t> head_cached_ {};
+    uint32_t tail_cached_ {};
+    uint32_t head_cached_ {};
 
     uint32_t get_index(const uint32_t idx) const {
         // Use bit-mask with AND to get the remainder (C is always a power of 2)
@@ -49,7 +53,7 @@ public:
 
         // pass into is_full so we ensure we do not need to re-acquire
         if (is_full(head_cached_, curr_tail)) {
-            head_cached = {head.load(std::memory_order_acquire)};
+            head_cached_ = head.load(std::memory_order_acquire);
             if (is_full(head_cached_, curr_tail)) return false;
         };
 
@@ -65,7 +69,7 @@ public:
         auto curr_tail {tail.load(std::memory_order_relaxed)};
 
         if (is_full(head_cached_, curr_tail)) {
-            head_cached = {head.load(std::memory_order_acquire)};
+            head_cached_ = head.load(std::memory_order_acquire);
             if (is_full(head_cached_, curr_tail)) return false;
         };
 
@@ -78,9 +82,11 @@ public:
     
     std::optional<T> get() {
         auto curr_head {head.load(std::memory_order_relaxed)};
-        auto curr_tail {tail.load(std::memory_order_acquire)};
 
-        if (is_empty(curr_head, curr_tail)) return std::nullopt;
+        if (is_empty(curr_head, tail_cached_)) {
+            tail_cached_ = tail.load(std::memory_order_acquire);
+            if (is_empty(curr_head, tail_cached_)) return std::nullopt;
+        };
 
         auto result = std::move(ring_buffer[get_index(curr_head)]);
         // This line ensures that the writing of tail is indivisible, no line before the store is moved to 
