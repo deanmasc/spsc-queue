@@ -35,3 +35,4 @@ A single-producer single-consumer (SPSC) queue passes data between exactly two t
 #### • What would need to change to support multiple producers?
 - Since having multiple producers introduces data races we need to ensure that only one thread can process the push functon at once, therefore here I would use a scoped_lock for a mutex for the functon, therefore if two producer threads call push at the same time, one has to wait until the second is finished.
 - This would ensure that the two threads aren't reading and writing to the ring buffer and tail at the same time
+- However, there is ways this can be done without using locks. We can make use of slot sequence numbers 
