@@ -30,6 +30,7 @@ A single-producer single-consumer (SPSC) queue passes data between exactly two t
 #### • What does your round-trip latency number tell you about the cost of the atomic operations involved?
 - results: p50=125.0 ns   p99=167.0 ns   p99.9=3.33 us    (n=20000)
 - We are in the realm of nano seconds for most of the round trip operation letencies, therefore the atomic operations are clearly much quicker than locks
+- Most of the 125ns in p50 are not the atomic operations, these are likely to be the interconnect communication from cache to cache
 
 #### • What would need to change to support multiple producers?
 - Since having multiple producers introduces data races we need to ensure that only one thread can process the push functon at once, therefore here I would use a scoped_lock for a mutex for the functon, therefore if two producer threads call push at the same time, one has to wait until the second is finished.
